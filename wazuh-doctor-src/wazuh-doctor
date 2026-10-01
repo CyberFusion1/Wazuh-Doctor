@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#
+# wazuh-doctor -- launcher
+#
+# Thin bash front end. It does the shell-shaped jobs (locating the
+# install, finding an interpreter, sanity-checking privileges) and then
+# hands off to the Python implementation in wdlib/cli.py.
+#
+# Everything else lives in Python so the checks stay reviewable.
+
+set -euo pipefail
+
+# Resolve symlinks first. Installed via /usr/local/bin/wazuh-doctor -> the
+# real script in /opt, BASH_SOURCE is the *symlink* path, so without this
+# ROOT would come out as /usr/local/bin and wdlib/ would look missing.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -- "$(dirname -- "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    case "$SOURCE" in
+        /*) ;;                        # already absolute
+        *)  SOURCE="$DIR/$SOURCE" ;;  # relative link: resolve against its dir
+    esac
+done
+ROOT="$(cd -- "$(dirname -- "$SOURCE")" && pwd)"
+
+PYTHON="${WAZUH_DOCTOR_PYTHON:-python3}"
+
+die() { printf 'wazuh-doctor: %s\n' "$1" >&2; exit "${2:-1}"; }
+
+# --- interpreter -----------------------------------------------------------
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+    die "python3 not found in PATH (set WAZUH_DOCTOR_PYTHON to override)" 127
+fi
+
+PYVER="$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 0.0)"
+case "$PYVER" in
+    2.*|0.0) die "python 3.8+ required, found $PYVER" 127 ;;
+esac
+
+# --- layout ----------------------------------------------------------------
+[ -f "$ROOT/wdlib/cli.py" ] || die "installation looks broken: $ROOT/wdlib/cli.py missing" 127
+[ -d "$ROOT/modules" ]     || die "installation looks broken: $ROOT/modules missing" 127
+
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# Keep Python from writing .pyc into a root-owned install dir when run
+# unprivileged; a failure to write bytecode must never break the scan.
+export PYTHONDONTWRITEBYTECODE=1
+
+# --- privilege hint --------------------------------------------------------
+# --fix mutates the host; nudge toward sudo, but let Python produce the
+# real message so dry runs and --yes behave consistently.
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    for arg in "$@"; do
+        if [ "$arg" = "--fix" ]; then
+            printf 'wazuh-doctor: note: --fix is running unprivileged; most repairs will need sudo\n' >&2
+            break
+        fi
+    done
+fi
+
+exec "$PYTHON" -m wdlib.cli "$@"
